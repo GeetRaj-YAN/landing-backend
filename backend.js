@@ -277,13 +277,14 @@ const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
-    if (req.method === 'POST' && req.url === '/save') {
+    if (req.method === 'POST' && (req.url === '/save' || req.url === '/')) {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
             try {
+                if (!body) throw new Error('Empty request body');
                 const data = JSON.parse(body);
-                console.log('Received data to save:', data.name);
+                console.log('Received data to save:', data.name || 'No name');
 
                 // CSV Save
                 const headers = Object.keys(data);
