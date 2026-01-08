@@ -13,6 +13,7 @@ const ZOHO_REGION = process.env.ZOHO_REGION || 'in';
 const ZOHO_CLIENT_ID = process.env.ZOHO_CLIENT_ID;
 const ZOHO_CLIENT_SECRET = process.env.ZOHO_CLIENT_SECRET;
 const ZOHO_GRANT_CODE = process.env.ZOHO_GRANT_CODE;
+const ZOHO_REFRESH_TOKEN = process.env.ZOHO_REFRESH_TOKEN;
 const ZOHO_WORKBOOK_ID = process.env.ZOHO_WORKBOOK_ID;
 const ZOHO_SHEET_NAME = process.env.ZOHO_SHEET_NAME || 'Sheet1';
 
@@ -62,7 +63,28 @@ const FIELD_MAPPINGS = {
 };
 
 async function getValidAccessToken() {
-    if (!fs.existsSync(TOKENS_FILE)) {
+    let tokens = null;
+
+    // 1. Try to load from tokens.json
+    if (fs.existsSync(TOKENS_FILE)) {
+        try {
+            tokens = JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8'));
+        } catch (err) {
+            console.error('Error reading tokens.json:', err.message);
+        }
+    }
+
+    // 2. If no tokens but we have ZOHO_REFRESH_TOKEN env var, use it
+    if (!tokens && ZOHO_REFRESH_TOKEN) {
+        console.log('Using ZOHO_REFRESH_TOKEN from environment...');
+        tokens = { refresh_token: ZOHO_REFRESH_TOKEN, expires_at: 0 };
+    }
+
+    // 3. If still no tokens, try grant code
+    if (!tokens) {
+        if (!ZOHO_GRANT_CODE) {
+            throw new Error('No authentication method available. Set ZOHO_REFRESH_TOKEN or ZOHO_GRANT_CODE.');
+        }
         console.log(`Exchanging grant code for tokens...`);
         try {
             const response = await axios.post(`https://accounts.zoho.${ZOHO_REGION}/oauth/v2/token`, null, {
@@ -73,12 +95,16 @@ async function getValidAccessToken() {
                     grant_type: 'authorization_code'
                 }
             });
-            const tokens = {
+            tokens = {
                 access_token: response.data.access_token,
                 refresh_token: response.data.refresh_token,
                 expires_at: Date.now() + (response.data.expires_in * 1000)
             };
-            fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2));
+            try {
+                fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2));
+            } catch (e) {
+                console.warn('Could not write tokens.json (likely read-only cloud environment)');
+            }
             return tokens.access_token;
         } catch (err) {
             console.error('Error exchanging grant code:', err.response?.data || err.message);
@@ -86,8 +112,8 @@ async function getValidAccessToken() {
         }
     }
 
-    let tokens = JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8'));
-    if (Date.now() >= tokens.expires_at - 60000) {
+    // 4. Refresh if expired or almost expired
+    if (Date.now() >= (tokens.expires_at || 0) - 60000) {
         console.log('Refreshing access token...');
         try {
             const response = await axios.post(`https://accounts.zoho.${ZOHO_REGION}/oauth/v2/token`, null, {
@@ -100,10 +126,18 @@ async function getValidAccessToken() {
             });
             tokens.access_token = response.data.access_token;
             tokens.expires_at = Date.now() + (response.data.expires_in * 1000);
-            fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2));
+            try {
+                fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2));
+            } catch (e) {
+                console.warn('Could not update tokens.json (likely read-only cloud environment)');
+            }
         } catch (err) {
             console.error('Error refreshing token:', err.response?.data || err.message);
-            if (fs.existsSync(TOKENS_FILE)) fs.unlinkSync(TOKENS_FILE);
+            // If it fails and we have a grant code, maybe it was a one-time thing or the refresh token died
+            if (ZOHO_GRANT_CODE) {
+                console.log('Refresh failed, but grant code exists. Will try grant code on next run.');
+                if (fs.existsSync(TOKENS_FILE)) fs.unlinkSync(TOKENS_FILE);
+            }
             throw new Error('Zoho token refresh failed.');
         }
     }
